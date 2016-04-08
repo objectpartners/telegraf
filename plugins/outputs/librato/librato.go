@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/internal"
@@ -152,17 +153,13 @@ func (l *Librato) Description() string {
 	return "Configuration for Librato API to send metrics to."
 }
 
-func (l *Librato) buildGaugeName(m telegraf.Metric, fieldName string) string {
-	// Use the GraphiteSerializer
-	graphiteSerializer := graphite.GraphiteSerializer{}
-	return graphiteSerializer.SerializeBucketName(m, fieldName)
-}
-
 func (l *Librato) buildGauges(m telegraf.Metric) ([]*Gauge, error) {
 	gauges := []*Gauge{}
+	graphiteSerializer := graphite.GraphiteSerializer{}
+	bucket := graphiteSerializer.SerializeBucketName(m.Name(), m.Tags())
 	for fieldName, value := range m.Fields() {
 		gauge := &Gauge{
-			Name:        l.buildGaugeName(m, fieldName),
+			Name:        strings.Replace(bucket, "FIELDNAME", fieldName, 1),
 			MeasureTime: m.Time().Unix(),
 		}
 		if !gauge.verifyValue(value) {

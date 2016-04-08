@@ -8,11 +8,14 @@ import (
 	"github.com/influxdata/telegraf"
 )
 
+const DEFAULT_TEMPLATE = "host.tags.measurement.field"
+
 type GraphiteSerializer struct {
-	Prefix string
+	Prefix   string
+	Template string
 }
 
-var sanitizedChars = strings.NewReplacer("/", "-", "@", "-", " ", "_")
+var sanitizedChars = strings.NewReplacer("/", "-", "@", "-", " ", "_", "..", ".")
 
 func (s *GraphiteSerializer) Serialize(metric telegraf.Metric) ([]string, error) {
 	out := []string{}
@@ -20,13 +23,16 @@ func (s *GraphiteSerializer) Serialize(metric telegraf.Metric) ([]string, error)
 	// Convert UnixNano to Unix timestamps
 	timestamp := metric.UnixNano() / 1000000000
 
+	bucket := s.SerializeBucketName(metric.Name(), metric.Tags())
+
 	for field_name, value := range metric.Fields() {
 		// Convert value
 		value_str := fmt.Sprintf("%#v", value)
 		// Write graphite metric
 		var graphitePoint string
 		graphitePoint = fmt.Sprintf("%s %s %d",
-			s.SerializeBucketName(metric, field_name),
+			// insert "field" section of template
+			strings.Replace(bucket, "FIELDNAME", field_name, 1),
 			value_str,
 			timestamp)
 		out = append(out, graphitePoint)
@@ -34,51 +40,69 @@ func (s *GraphiteSerializer) Serialize(metric telegraf.Metric) ([]string, error)
 	return out, nil
 }
 
-func (s *GraphiteSerializer) SerializeBucketName(metric telegraf.Metric, field_name string) string {
-	// Get the metric name
-	name := metric.Name()
-
-	// Convert UnixNano to Unix timestamps
-	tag_str := buildTags(metric)
-
-	// Write graphite metric
-	var serializedBucketName string
-	if name == field_name {
-		serializedBucketName = fmt.Sprintf("%s.%s",
-			tag_str,
-			strings.Replace(name, ".", "_", -1))
-	} else {
-		serializedBucketName = fmt.Sprintf("%s.%s.%s",
-			tag_str,
-			strings.Replace(name, ".", "_", -1),
-			strings.Replace(field_name, ".", "_", -1))
+// SerializeBucketName will take the given measurement name and tags and
+// produce a graphite bucket. It will use the GraphiteSerializer.Template
+// to generate this, or DEFAULT_TEMPLATE.
+//
+// NOTE: SerializeBucketName replaces the "field" portion of the template with
+// FIELDNAME. It is up to the user to replace this. This is so that
+// SerializeBucketName can be called just once per measurement, rather than
+// once per field.
+func (s *GraphiteSerializer) SerializeBucketName(
+	measurement string,
+	tags map[string]string,
+) string {
+	if s.Template == "" {
+		s.Template = DEFAULT_TEMPLATE
 	}
-	if s.Prefix != "" {
-		serializedBucketName = fmt.Sprintf("%s.%s", s.Prefix, serializedBucketName)
+	tagsCopy := make(map[string]string)
+	for k, v := range tags {
+		tagsCopy[k] = v
 	}
-	return serializedBucketName
+
+	var out []string
+	templateParts := strings.Split(s.Template, ".")
+	for _, templatePart := range templateParts {
+		switch templatePart {
+		case "measurement":
+			out = append(out, measurement)
+		case "tags":
+			// we will replace this later
+			out = append(out, "TAGS")
+		case "field":
+			// user of SerializeBucketName needs to replace this
+			out = append(out, "FIELDNAME")
+		default:
+			// This is a tag being applied
+			if tagvalue, ok := tagsCopy[templatePart]; ok {
+				out = append(out, strings.Replace(tagvalue, ".", "_", -1))
+				delete(tagsCopy, templatePart)
+			}
+		}
+	}
+
+	// insert remaining tags into output name
+	for i, templatePart := range out {
+		if templatePart == "TAGS" {
+			out[i] = buildTags(tagsCopy)
+			break
+		}
+	}
+
+	if s.Prefix == "" {
+		return sanitizedChars.Replace(strings.Join(out, "."))
+	}
+	return sanitizedChars.Replace(s.Prefix + "." + strings.Join(out, "."))
 }
 
-func buildTags(metric telegraf.Metric) string {
+func buildTags(tags map[string]string) string {
 	var keys []string
-	tags := metric.Tags()
 	for k := range tags {
-		if k == "host" {
-			continue
-		}
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 
 	var tag_str string
-	if host, ok := tags["host"]; ok {
-		if len(keys) > 0 {
-			tag_str = strings.Replace(host, ".", "_", -1) + "."
-		} else {
-			tag_str = strings.Replace(host, ".", "_", -1)
-		}
-	}
-
 	for i, k := range keys {
 		tag_value := strings.Replace(tags[k], ".", "_", -1)
 		if i == 0 {
@@ -87,5 +111,5 @@ func buildTags(metric telegraf.Metric) string {
 			tag_str += "." + tag_value
 		}
 	}
-	return sanitizedChars.Replace(tag_str)
+	return tag_str
 }
